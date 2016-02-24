@@ -17,26 +17,20 @@
 
 package practicalrxjava;
 
-import com.datastax.driver.core.BoundStatement;
 import com.datastax.driver.core.PreparedStatement;
 import com.datastax.driver.core.ResultSet;
-import com.datastax.driver.core.ResultSetFuture;
-import com.datastax.driver.core.Row;
 import com.datastax.driver.core.Session;
 import com.datastax.driver.core.utils.UUIDs;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.google.common.base.Function;
 import com.google.common.base.Throwables;
-import com.google.common.util.concurrent.FutureCallback;
-import com.google.common.util.concurrent.Futures;
-import com.google.common.util.concurrent.ListenableFuture;
-import com.google.common.util.concurrent.MoreExecutors;
+import org.hawkular.rx.cassandra.driver.RxSession;
+import org.hawkular.rx.cassandra.driver.RxSessionImpl;
+import rx.Observable;
 
 import javax.annotation.PostConstruct;
-import javax.annotation.PreDestroy;
 import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
 import javax.ws.rs.Consumes;
@@ -52,10 +46,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
-import java.util.List;
 import java.util.Properties;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 /**
  * @author Thomas Segismont
@@ -64,23 +55,23 @@ import java.util.concurrent.Executors;
 @ApplicationScoped
 public class TemperatureEndpoint {
 
-  ExecutorService executor;
   ObjectMapper mapper;
   Properties queries;
   PreparedStatement insertData;
   PreparedStatement findDataByDateRange;
+  RxSession rxSession;
 
   @Inject
   Session session;
 
   @PostConstruct
   void init() {
-    executor = MoreExecutors.listeningDecorator(Executors.newCachedThreadPool());
     mapper = new ObjectMapper();
     queries = new Properties();
     loadQueries();
     insertData = session.prepare(queries.getProperty("insertData"));
     findDataByDateRange = session.prepare(queries.getProperty("findDataByDateRange"));
+    rxSession = new RxSessionImpl(session);
   }
 
   private void loadQueries() {
@@ -96,80 +87,49 @@ public class TemperatureEndpoint {
   @Path("/data")
   @Consumes("application/json")
   public void addDataPoint(@Suspended AsyncResponse asyncResponse, JsonNode json) {
+    Observable.just(json)
+      .map(jsonNode -> {
+        String city = json.get("city").textValue();
+        double value = json.get("value").doubleValue();
+        long timestamp = System.currentTimeMillis();
 
-    String city = json.get("city").textValue();
-    double value = json.get("value").doubleValue();
-    long timestamp = System.currentTimeMillis();
-
-    BoundStatement boundStatement = insertData.bind(value, city, UUIDGen.getTimeUUID(timestamp));
-
-    ResultSetFuture resultSetFuture = session.executeAsync(boundStatement);
-
-    ListenableFuture<Boolean> successFuture = Futures.transform(resultSetFuture, ResultSet::wasApplied, executor);
-
-    Futures.addCallback(successFuture, new FutureCallback<Boolean>() {
-      @Override
-      public void onSuccess(Boolean wasApplied) {
+        return insertData.bind(value, city, UUIDGen.getTimeUUID(timestamp));
+      })
+      .flatMap(rxSession::execute)
+      .map(ResultSet::wasApplied)
+      .subscribe(wasApplied -> {
         if (wasApplied) {
           asyncResponse.resume(Response.ok().build());
         } else {
           asyncResponse.resume(Response.serverError().build());
         }
-      }
-
-      @Override
-      public void onFailure(Throwable t) {
+      }, t -> {
         asyncResponse.resume(Response.serverError().entity(Throwables.getStackTraceAsString(t)).build());
-      }
-    });
+      });
   }
 
   @GET
   @Path("/data")
   @Produces("application/json")
   public void getDataPoints(@Suspended AsyncResponse asyncResponse, @QueryParam("city") String city, @QueryParam("from") String from, @QueryParam("to") String to) {
-
     long start = toTimestamp(from);
     long end = toTimestamp(to);
-
-    BoundStatement boundStatement = findDataByDateRange.bind(city, UUIDGen.getTimeUUID(start), UUIDGen.getTimeUUID(end));
-
-    ResultSetFuture resultSetFuture = session.executeAsync(boundStatement);
-
-    ListenableFuture<List<Row>> rowsFuture = Futures.transform(resultSetFuture, ResultSet::all, executor);
-
-    ListenableFuture<JsonNode> jsonFuture = Futures.transform(rowsFuture, (Function<List<Row>, JsonNode>) input -> {
-      ArrayNode result = mapper.createArrayNode();
-      input.stream().forEach(row -> {
+    Observable.just(findDataByDateRange.bind(city, UUIDGen.getTimeUUID(start), UUIDGen.getTimeUUID(end)))
+      .flatMap(rxSession::execute)
+      .flatMap(Observable::from)
+      .map(row -> {
         ObjectNode objectNode = mapper.createObjectNode();
         objectNode.put("time", UUIDs.unixTimestamp(row.getUUID("time")));
         objectNode.put("value", row.getDouble("value"));
-        result.add(objectNode);
-      });
-      return result;
-    });
-
-    Futures.addCallback(jsonFuture, new FutureCallback<JsonNode>() {
-      @Override
-      public void onSuccess(JsonNode jsonNode) {
-        asyncResponse.resume(Response.ok(jsonNode).build());
-      }
-
-      @Override
-      public void onFailure(Throwable t) {
+        return objectNode;
+      })
+      .collect(() -> mapper.createArrayNode(), ArrayNode::add)
+      .subscribe(jsonNode -> asyncResponse.resume(Response.ok(jsonNode).build()), t -> {
         asyncResponse.resume(Response.serverError().entity(Throwables.getStackTraceAsString(t)).build());
-      }
     });
   }
 
   private long toTimestamp(String localDateTimeString) {
     return LocalDateTime.parse(localDateTimeString).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
-  }
-
-  @PreDestroy
-  void shutdown() {
-    if (executor != null) {
-      executor.shutdown();
-    }
   }
 }
