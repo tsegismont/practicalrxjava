@@ -1,0 +1,5 @@
+= Practical RxJava Presentation Repository
+
+== About
+
+This is the repository for my _Practical RxJava, recipes from Hawkular Metrics_ presentation.
