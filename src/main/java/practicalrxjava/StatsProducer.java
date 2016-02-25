@@ -17,14 +17,20 @@
 
 package practicalrxjava;
 
+import rx.Observable;
+import rx.Subscription;
+import rx.schedulers.Schedulers;
+
 import javax.annotation.Resource;
 import javax.inject.Inject;
 import javax.jms.JMSContext;
 import javax.jms.JMSDestinationDefinition;
+import javax.jms.JMSProducer;
 import javax.jms.Topic;
 import javax.servlet.ServletContextEvent;
 import javax.servlet.ServletContextListener;
 import javax.servlet.annotation.WebListener;
+import java.util.concurrent.TimeUnit;
 
 /**
  * @author Thomas Segismont
@@ -39,13 +45,25 @@ public class StatsProducer implements ServletContextListener {
   @Resource(lookup = "java:/topic/stats")
   Topic topic;
 
+  @Inject
+  TemperatureEndpoint temperatureEndpoint;
+
+  Subscription subscription;
+
   @Override
   public void contextInitialized(ServletContextEvent sce) {
-    // FIXME
+    JMSProducer producer = context.createProducer();
+    subscription = Observable.interval(5, TimeUnit.SECONDS)
+      .flatMap(i -> temperatureEndpoint.getStatsObservable("marseille"))
+      .observeOn(Schedulers.io())
+      .doOnNext(jsonNode -> {
+        producer.send(topic, jsonNode.toString());
+      })
+      .subscribe();
   }
 
   @Override
   public void contextDestroyed(ServletContextEvent sce) {
-    // FIXME
+    subscription.unsubscribe();
   }
 }

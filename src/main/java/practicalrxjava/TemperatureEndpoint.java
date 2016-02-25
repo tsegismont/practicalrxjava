@@ -129,16 +129,23 @@ public class TemperatureEndpoint {
       .collect(() -> mapper.createArrayNode(), ArrayNode::add)
       .subscribe(jsonNode -> asyncResponse.resume(Response.ok(jsonNode).build()), t -> {
         asyncResponse.resume(Response.serverError().entity(Throwables.getStackTraceAsString(t)).build());
-    });
+      });
   }
 
   @GET
   @Path("/stats")
   @Produces("application/json")
   public void getDataStats(@Suspended AsyncResponse asyncResponse, @QueryParam("city") String city) {
+    Observable<ArrayNode> statsObservable = getStatsObservable(city);
+    statsObservable.subscribe(jsonNode -> asyncResponse.resume(Response.ok(jsonNode).build()), t -> {
+      asyncResponse.resume(Response.serverError().entity(Throwables.getStackTraceAsString(t)).build());
+    });
+  }
+
+  public Observable<ArrayNode> getStatsObservable(String city) {
     long end = System.currentTimeMillis();
     long start = end - MILLISECONDS.convert(365, DAYS);
-    Observable.just(findDataByDateRange.bind(city, UUIDGen.getTimeUUID(start), UUIDGen.getTimeUUID(end)))
+    return Observable.just(findDataByDateRange.bind(city, UUIDGen.getTimeUUID(start), UUIDGen.getTimeUUID(end)))
       .flatMap(rxSession::execute)
       .flatMap(Observable::from)
       .map(row -> {
@@ -164,10 +171,7 @@ public class TemperatureEndpoint {
         });
       })
       .doOnNext(statNode -> statNode.put("mean", statNode.get("total").doubleValue() / statNode.get("count").longValue()))
-      .collect(() -> mapper.createArrayNode(), ArrayNode::add)
-      .subscribe(jsonNode -> asyncResponse.resume(Response.ok(jsonNode).build()), t -> {
-        asyncResponse.resume(Response.serverError().entity(Throwables.getStackTraceAsString(t)).build());
-      });
+      .collect(() -> mapper.createArrayNode(), ArrayNode::add);
   }
 
   private long toTimestamp(String localDateTimeString) {
