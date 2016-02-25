@@ -44,9 +44,12 @@ import javax.ws.rs.container.Suspended;
 import javax.ws.rs.core.Response;
 import java.io.IOException;
 import java.io.InputStream;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.Properties;
+
+import static java.util.concurrent.TimeUnit.*;
 
 /**
  * @author Thomas Segismont
@@ -127,6 +130,44 @@ public class TemperatureEndpoint {
       .subscribe(jsonNode -> asyncResponse.resume(Response.ok(jsonNode).build()), t -> {
         asyncResponse.resume(Response.serverError().entity(Throwables.getStackTraceAsString(t)).build());
     });
+  }
+
+  @GET
+  @Path("/stats")
+  @Produces("application/json")
+  public void getDataStats(@Suspended AsyncResponse asyncResponse, @QueryParam("city") String city) {
+    long end = System.currentTimeMillis();
+    long start = end - MILLISECONDS.convert(365, DAYS);
+    Observable.just(findDataByDateRange.bind(city, UUIDGen.getTimeUUID(start), UUIDGen.getTimeUUID(end)))
+      .flatMap(rxSession::execute)
+      .flatMap(Observable::from)
+      .map(row -> {
+        ObjectNode objectNode = mapper.createObjectNode();
+        objectNode.put("time", UUIDs.unixTimestamp(row.getUUID("time")));
+        objectNode.put("value", row.getDouble("value"));
+        return objectNode;
+      })
+      .groupBy(jsonNode -> {
+        long timestamp = jsonNode.get("time").longValue();
+        return Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault()).getMonthValue();
+      })
+      .flatMap(group -> {
+        return group.collect(() -> {
+          ObjectNode objectNode = mapper.createObjectNode();
+          objectNode.put("month", group.getKey());
+          objectNode.put("count", 0L);
+          objectNode.put("total", 0D);
+          return objectNode;
+        }, (statNode, pointNode) -> {
+          statNode.put("count", statNode.get("count").longValue() + 1);
+          statNode.put("total", statNode.get("total").doubleValue() + pointNode.get("value").doubleValue());
+        });
+      })
+      .doOnNext(statNode -> statNode.put("mean", statNode.get("total").doubleValue() / statNode.get("count").longValue()))
+      .collect(() -> mapper.createArrayNode(), ArrayNode::add)
+      .subscribe(jsonNode -> asyncResponse.resume(Response.ok(jsonNode).build()), t -> {
+        asyncResponse.resume(Response.serverError().entity(Throwables.getStackTraceAsString(t)).build());
+      });
   }
 
   private long toTimestamp(String localDateTimeString) {
